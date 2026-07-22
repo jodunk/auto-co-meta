@@ -3208,7 +3208,9 @@ This is Cycle #$loop_count. Act decisively."
             # Check if any artifacts were logged this cycle
             artifacts_this_cycle=0
             if [ -f "$PROJECT_DIR/$STATE_DIR/artifacts.jsonl" ]; then
-                artifacts_this_cycle=$(grep -c "\"cycle\":$loop_count" "$PROJECT_DIR/$STATE_DIR/artifacts.jsonl" 2>/dev/null) || artifacts_this_cycle=0
+                # Anchor on the JSON field terminator (,|}) so cycle 1 does not
+                # substring-match cycle 10/11/100 etc. ERE (-E) for the alternation.
+                artifacts_this_cycle=$(grep -Ec "\"cycle\":$loop_count(,|})" "$PROJECT_DIR/$STATE_DIR/artifacts.jsonl" 2>/dev/null) || artifacts_this_cycle=0
             fi
             if [ "$artifacts_this_cycle" -eq 0 ]; then
                 cycle_was_idle=1
