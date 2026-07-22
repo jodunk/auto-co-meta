@@ -199,13 +199,27 @@ append_cycle_history() {
     # Normalize is_error to a JSON bool literal (true|false)
     local is_error=false
     [ "$is_error_raw" = "true" ] && is_error=true
-    # Sanitize reason: collapse newlines, escape double quotes so JSONL stays valid
-    reason="${reason//[$'\n\r']/ }"
+    # Sanitize reason into a valid JSON string. Backslash MUST be escaped first:
+    # a Windows-style path or trailing \ in a reason would otherwise emit an
+    # invalid escape (e.g. C:\Users\foo, or path\" that swallows the closing
+    # quote) and corrupt the JSONL line that --history/--dashboard later slurp
+    # with `jq -s` -- one bad line returns nothing and nukes the whole dashboard.
+    # Order matters: backslash, then control chars, then double quotes.
+    reason="${reason//\\/\\\\}"
+    reason="${reason//[$'\n\r\t']/ }"
     reason="${reason//\"/\\\"}"
-    # Append structured JSONL record for analytics
-    printf '{"cycle":%d,"timestamp":"%s","status":"%s","cost":%s,"duration_s":%d,"exit_code":%d,"model":"%s","total_cost":%s,"is_error":%s,"reason":"%s"}\n' \
-        "$cycle_num" "$timestamp" "$status" "${cost:-0}" "${duration:-0}" "${exit_code:-0}" "$MODEL" "$total_cost" "$is_error" "$reason" \
-        >> "$CYCLE_HISTORY_FILE"
+    # Build the record, then self-check BEFORE it touches the file: if ANY field
+    # ever breaks JSON (now or future), fall back to a guaranteed-valid minimal
+    # record. One corrupt line must never enter cycle-history.jsonl.
+    local line
+    line=$(printf '{"cycle":%d,"timestamp":"%s","status":"%s","cost":%s,"duration_s":%d,"exit_code":%d,"model":"%s","total_cost":%s,"is_error":%s,"reason":"%s"}' \
+        "$cycle_num" "$timestamp" "$status" "${cost:-0}" "${duration:-0}" "${exit_code:-0}" "$MODEL" "$total_cost" "$is_error" "$reason")
+    if ! printf '%s' "$line" | jq -e . >/dev/null 2>&1; then
+        log "WARNING: cycle $cycle_num history record failed JSON validation; emitting sanitized record"
+        line=$(printf '{"cycle":%d,"timestamp":"%s","status":"%s","cost":0,"duration_s":0,"exit_code":%d,"model":"","total_cost":0,"is_error":%s,"reason":"<sanitized: invalid reason field>"}' \
+            "$cycle_num" "$timestamp" "$status" "${exit_code:-0}" "$is_error")
+    fi
+    printf '%s\n' "$line" >> "$CYCLE_HISTORY_FILE"
 }
 
 backup_consensus() {
