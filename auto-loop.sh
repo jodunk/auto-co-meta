@@ -258,6 +258,20 @@ validate_consensus() {
     return 0
 }
 
+# Escape a value for safe embedding inside a JSON string field. A raw " or \ in
+# $MODEL, a status, or an error reason (which often comes straight from captured
+# command output) would otherwise break the payload: invalid JSON that the
+# receiver rejects or misparses. Backslash first, then quote, then control chars.
+json_escape() {
+    local s="${1-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
 send_notification() {
     [ -z "$NOTIFY_URL" ] && return 0
     local cycle_num=$1
@@ -268,7 +282,7 @@ send_notification() {
     timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     local payload
     payload=$(printf '{"cycle":%d,"status":"%s","cost":%s,"duration_s":%d,"model":"%s","total_cost":%s,"timestamp":"%s"}' \
-        "$cycle_num" "$status" "${cost}" "${duration}" "$MODEL" "$total_cost" "$timestamp")
+        "$cycle_num" "$(json_escape "$status")" "${cost}" "${duration}" "$(json_escape "$MODEL")" "$total_cost" "$(json_escape "$timestamp")")
     # Fire-and-forget: don't block the loop if the webhook is slow or down
     curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "$payload" "$NOTIFY_URL" --max-time 10 &
 }
@@ -281,7 +295,7 @@ send_webhook() {
     # Build base payload with event type
     local payload
     payload=$(printf '{"event":"%s","timestamp":"%s","model":"%s","project":"%s"' \
-        "$event" "$timestamp" "$MODEL" "$(basename "$PROJECT_DIR")")
+        "$(json_escape "$event")" "$(json_escape "$timestamp")" "$(json_escape "$MODEL")" "$(json_escape "$(basename "$PROJECT_DIR")")")
     # Append event-specific fields
     case "$event" in
         cycle.start)
@@ -289,11 +303,11 @@ send_webhook() {
             ;;
         cycle.end)
             payload=$(printf '%s,"cycle":%d,"status":"%s","cost":%s,"duration_s":%d,"total_cost":%s}' \
-                "$payload" "${2:-0}" "${3:-unknown}" "${4:-0}" "${5:-0}" "$total_cost")
+                "$payload" "${2:-0}" "$(json_escape "${3:-unknown}")" "${4:-0}" "${5:-0}" "$total_cost")
             ;;
         error)
             payload=$(printf '%s,"cycle":%d,"reason":"%s","error_count":%d,"max_errors":%d}' \
-                "$payload" "${2:-0}" "${3:-unknown}" "${4:-0}" "$MAX_CONSECUTIVE_ERRORS")
+                "$payload" "${2:-0}" "$(json_escape "${3:-unknown}")" "${4:-0}" "$MAX_CONSECUTIVE_ERRORS")
             ;;
         circuit_break)
             payload=$(printf '%s,"cycle":%d,"cooldown_s":%d,"error_count":%d}' \
