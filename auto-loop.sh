@@ -192,11 +192,19 @@ append_cycle_history() {
     local cost=${3:-0}
     local duration=$4
     local exit_code=$5
+    local reason="${6:-}"
+    local is_error_raw="${7:-}"
     local timestamp
     timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    # Normalize is_error to a JSON bool literal (true|false)
+    local is_error=false
+    [ "$is_error_raw" = "true" ] && is_error=true
+    # Sanitize reason: collapse newlines, escape double quotes so JSONL stays valid
+    reason="${reason//[$'\n\r']/ }"
+    reason="${reason//\"/\\\"}"
     # Append structured JSONL record for analytics
-    printf '{"cycle":%d,"timestamp":"%s","status":"%s","cost":%s,"duration_s":%d,"exit_code":%d,"model":"%s","total_cost":%s}\n' \
-        "$cycle_num" "$timestamp" "$status" "${cost:-0}" "${duration:-0}" "${exit_code:-0}" "$MODEL" "$total_cost" \
+    printf '{"cycle":%d,"timestamp":"%s","status":"%s","cost":%s,"duration_s":%d,"exit_code":%d,"model":"%s","total_cost":%s,"is_error":%s,"reason":"%s"}\n' \
+        "$cycle_num" "$timestamp" "$status" "${cost:-0}" "${duration:-0}" "${exit_code:-0}" "$MODEL" "$total_cost" "$is_error" "$reason" \
         >> "$CYCLE_HISTORY_FILE"
 }
 
@@ -507,6 +515,7 @@ extract_cycle_metadata() {
     RESULT_TEXT=""
     CYCLE_COST=""
     CYCLE_SUBTYPE=""
+    CYCLE_IS_ERROR=""
 
     # stream-json: each line is a JSON event; the final "result" event has the summary
     if command -v jq &>/dev/null; then
@@ -517,11 +526,13 @@ extract_cycle_metadata() {
             RESULT_TEXT=$(echo "$result_line" | jq -r '.result // empty' 2>/dev/null | head -c 2000 || true)
             CYCLE_COST=$(echo "$result_line" | jq -r '.total_cost_usd // empty' 2>/dev/null || true)
             CYCLE_SUBTYPE=$(echo "$result_line" | jq -r '.subtype // empty' 2>/dev/null || true)
+            CYCLE_IS_ERROR=$(echo "$result_line" | jq -r '.is_error // empty' 2>/dev/null || true)
         else
             # Fallback: try parsing as single JSON (non-stream format)
             RESULT_TEXT=$(echo "$OUTPUT" | jq -r '.result // empty' 2>/dev/null | head -c 2000 || true)
             CYCLE_COST=$(echo "$OUTPUT" | jq -r '.total_cost_usd // empty' 2>/dev/null || true)
             CYCLE_SUBTYPE=$(echo "$OUTPUT" | jq -r '.subtype // empty' 2>/dev/null || true)
+            CYCLE_IS_ERROR=$(echo "$OUTPUT" | jq -r '.is_error // empty' 2>/dev/null || true)
         fi
 
         # Second fallback: scan all events for total_cost_usd if still empty
@@ -3052,7 +3063,7 @@ This is Cycle #$loop_count. Act decisively."
         else
             log_cycle $loop_count "DIFF" "Consensus unchanged"
         fi
-        append_cycle_history "$loop_count" "ok" "${CYCLE_COST:-0}" "$cycle_duration" "$EXIT_CODE"
+        append_cycle_history "$loop_count" "ok" "${CYCLE_COST:-0}" "$cycle_duration" "$EXIT_CODE" "" "${CYCLE_IS_ERROR:-}"
         send_notification "$loop_count" "ok" "${CYCLE_COST:-0}" "$cycle_duration"
         send_webhook "cycle.end" "$loop_count" "ok" "${CYCLE_COST:-0}" "$cycle_duration"
         if [ "${SUMMARY_ENABLED:-true}" = "true" ]; then
@@ -3063,12 +3074,23 @@ This is Cycle #$loop_count. Act decisively."
         error_count=$((error_count + 1))
         log_cycle $loop_count "FAIL" "$cycle_failed_reason (cost: \$${CYCLE_COST:-unknown}, subtype: ${CYCLE_SUBTYPE:-unknown}, ${cycle_duration}s, errors: $error_count/$MAX_CONSECUTIVE_ERRORS)"
         send_webhook "error" "$loop_count" "$cycle_failed_reason" "$error_count"
-        append_cycle_history "$loop_count" "fail" "${CYCLE_COST:-0}" "$cycle_duration" "$EXIT_CODE"
+        append_cycle_history "$loop_count" "fail" "${CYCLE_COST:-0}" "$cycle_duration" "$EXIT_CODE" "$cycle_failed_reason" "${CYCLE_IS_ERROR:-}"
         send_notification "$loop_count" "fail" "${CYCLE_COST:-0}" "$cycle_duration"
         send_webhook "cycle.end" "$loop_count" "fail" "${CYCLE_COST:-0}" "$cycle_duration"
 
-        # Restore consensus on failure
-        restore_consensus
+        # Restore consensus ONLY when it's actually corrupt/invalid — not on every
+        # non-zero exit. A cycle can do real work AND hit a transient error (Claude
+        # returns subtype:success with is_error:true, exits 1, when a subagent or
+        # MCP call errors) and still write a valid consensus. Blindly restoring
+        # discards the relay baton and forces the next cycle to start from stale
+        # state. The atomic .tmp->mv write already prevents corruption;
+        # validate_consensus is the real gate.
+        if validate_consensus; then
+            log_cycle $loop_count "KEEP" "Consensus valid despite failure -- kept, work preserved"
+        else
+            restore_consensus
+            log_cycle $loop_count "RESTORE" "Consensus invalid after cycle -- restored from backup"
+        fi
         # Discard any partial atomic write
         rm -f "$PROJECT_DIR/memories/.consensus.tmp"
 
