@@ -252,6 +252,20 @@ validate_consensus() {
     if ! grep -q "^## Next Action" "$CONSENSUS_FILE"; then
         return 1
     fi
+    # Headers present is not enough -- the Next Action section must carry actual
+    # content. A header with an empty body means the relay baton was lost: the
+    # cycle was killed mid-write (or wrote structure with no body) and the next
+    # cycle would start with no direction. The atomic .tmp->mv rename protects
+    # against partial bytes, NOT against a structurally-complete-but-empty file.
+    # Scope is Next Action only -- it is the baton ("the single most important
+    # thing to do next cycle"); Company State is descriptive, header-presence
+    # suffices. Extract section body (lines after the header up to next `## `
+    # header) and require >=1 non-whitespace character.
+    local na_body
+    na_body=$(awk '/^## Next Action/{f=1;next} /^## /{f=0} f' "$CONSENSUS_FILE")
+    if [ -z "${na_body//[[:space:]]/}" ]; then
+        return 1
+    fi
     if ! grep -q "^## Company State" "$CONSENSUS_FILE"; then
         return 1
     fi

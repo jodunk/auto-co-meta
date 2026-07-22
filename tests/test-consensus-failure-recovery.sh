@@ -37,6 +37,11 @@ validate_consensus() {
     [ -s "$CONSENSUS_FILE" ] || return 1
     grep -q "^# Auto Company Consensus" "$CONSENSUS_FILE" || return 1
     grep -q "^## Next Action" "$CONSENSUS_FILE" || return 1
+    # Next Action must have a non-empty body -- a header alone means the relay
+    # baton was lost (cycle killed mid-write). Mirrors production fix.
+    local na_body
+    na_body=$(awk '/^## Next Action/{f=1;next} /^## /{f=0} f' "$CONSENSUS_FILE")
+    [ -n "${na_body//[[:space:]]/}" ] || return 1
     grep -q "^## Company State" "$CONSENSUS_FILE" || return 1
     return 0
 }
@@ -129,6 +134,19 @@ restore_consensus
 check "restore without backup: exit code" "$?" "1"
 check "restore without backup: invalid file left untouched" \
     "$(grep -c 'not a consensus file' "$CONSENSUS_FILE")" "1"
+
+# --- Case 6: headers present but Next Action body EMPTY -> RESTORE ---
+# Root cause this guards: a cycle killed mid-write (or that wrote structure
+# with no body) leaves a file with all three headers but an empty Next Action
+# section. The old gate (header-presence only) judged it VALID -> KEEP, so the
+# next cycle started from a relay baton with NO direction. Atomic .tmp->mv
+# protects against partial bytes, not against this. The body check is the fix.
+printf '%s\n' "$VALID_BACKUP" > "$BACKUP_FILE"
+printf '# Auto Company Consensus\n\n## Current Phase\nBuilding\n\n## Next Action\n\n## Company State\n- Product: widget\n' > "$CONSENSUS_FILE"
+action=$(apply_failure_recovery)
+check "empty Next Action body: action" "$action" "RESTORE"
+check "empty Next Action body: backup restored" \
+    "$(grep -c 'old)' "$CONSENSUS_FILE")" "1"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
