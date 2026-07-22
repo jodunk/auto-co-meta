@@ -1872,7 +1872,7 @@ if [ "${1:-}" = "--dashboard" ]; then
                     avg_dur: (([.[].duration_s] | add) / length | floor),
                     total_cost: (([.[].cost] | add) * 100 | floor / 100),
                     total_dur_h: (([.[].duration_s] | add) / 3600 * 100 | floor / 100),
-                    last5: [.[-5:][] | {c:.cycle, s:.status, cost:.cost, dur:.duration_s}]
+                    last5: [.[-5:][] | {c:.cycle, s:.status, cost:.cost, dur:.duration_s, r:(.reason // "-")}]
                 }
             end
         ' "$CYCLE_HISTORY_FILE" 2>/dev/null || echo "$cycle_stats")
@@ -1975,14 +1975,18 @@ if [ "${1:-}" = "--dashboard" ]; then
     printf "${BOLD}  RECENT CYCLES${RESET}\n"
     printf "  ${DIM}${line}${RESET}\n"
     printf "  ${DIM}%-8s %-8s %-10s %-10s${RESET}\n" "CYCLE" "STATUS" "COST" "TIME"
-    echo "$cycle_stats" | jq -r '.last5[] | "  \(.c)\t\(.s)\t$\(.cost)\t\(.dur)s"' 2>/dev/null | \
-        while IFS=$'\t' read -r cy st co du; do
+    echo "$cycle_stats" | jq -r '.last5[] | "  \(.c)\t\(.s)\t$\(.cost)\t\(.dur)s\t\(.r)"' 2>/dev/null | \
+        while IFS=$'\t' read -r cy st co du re; do
             if [ "$st" = "ok" ]; then
                 sc="${GREEN}"
             else
                 sc="${RED}"
             fi
-            printf "  %-8s ${sc}%-8s${RESET} %-10s %-10s\n" "$cy" "$st" "$co" "$du"
+            if [ -n "$re" ] && [ "$re" != "-" ]; then
+                printf "  %-8s ${sc}%-8s${RESET} %-10s %-10s ${RED}%s${RESET}\n" "$cy" "$st" "$co" "$du" "$re"
+            else
+                printf "  %-8s ${sc}%-8s${RESET} %-10s %-10s\n" "$cy" "$st" "$co" "$du"
+            fi
         done
     printf "\n"
 
@@ -2385,18 +2389,18 @@ if [ "${1:-}" = "--history" ]; then
     fi
     if [ "$compact" -eq 1 ]; then
         tail -n "$count" "$CYCLE_HISTORY_FILE" | jq -r \
-            '"\(.cycle) \(.status) $\(.cost) \(.duration_s)s \(.timestamp | split("T")[0])"'
+            '"\(.cycle) \(.status) $\(.cost) \(.duration_s)s \(.timestamp | split("T")[0]) [\(.reason // "-")]"'
         echo "-- $count of $total_lines cycles"
     else
-        printf "%-7s %-22s %-8s %-10s %-10s %-6s %-8s\n" \
-            "CYCLE" "TIMESTAMP" "STATUS" "COST" "DURATION" "EXIT" "MODEL"
-        printf "%-7s %-22s %-8s %-10s %-10s %-6s %-8s\n" \
-            "-----" "---------------------" "------" "--------" "--------" "----" "------"
+        printf "%-7s %-22s %-8s %-10s %-10s %-6s %-8s %s\n" \
+            "CYCLE" "TIMESTAMP" "STATUS" "COST" "DURATION" "EXIT" "MODEL" "REASON"
+        printf "%-7s %-22s %-8s %-10s %-10s %-6s %-8s %s\n" \
+            "-----" "---------------------" "------" "--------" "--------" "----" "------" "------"
         tail -n "$count" "$CYCLE_HISTORY_FILE" | jq -r \
-            '[.cycle, .timestamp, .status, .cost, .duration_s, .exit_code, .model] |
-             "\(.[0])\t\(.[1])\t\(.[2])\t$\(.[3])\t\(.[4])s\t\(.[5])\t\(.[6])"' | \
-            while IFS=$'\t' read -r cy ts st co du ex mo; do
-                printf "%-7s %-22s %-8s %-10s %-10s %-6s %-8s\n" "$cy" "$ts" "$st" "$co" "$du" "$ex" "$mo"
+            '[.cycle, .timestamp, .status, .cost, .duration_s, .exit_code, .model, (.reason // "-")] |
+             "\(.[0])\t\(.[1])\t\(.[2])\t$\(.[3])\t\(.[4])s\t\(.[5])\t\(.[6])\t\(.[7])"' | \
+            while IFS=$'\t' read -r cy ts st co du ex mo re; do
+                printf "%-7s %-22s %-8s %-10s %-10s %-6s %-8s %s\n" "$cy" "$ts" "$st" "$co" "$du" "$ex" "$mo" "$re"
             done
         echo ""
         echo "Showing last $count of $total_lines cycles"
