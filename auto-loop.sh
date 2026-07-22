@@ -215,10 +215,17 @@ backup_consensus() {
 }
 
 restore_consensus() {
+    # Returns 0 if restored from backup, 1 if there was no backup to restore
+    # from. Callers MUST branch on this — silently leaving an invalid consensus
+    # in place while logging "restored" would carry a corrupt relay baton into
+    # the next cycle (first cycle ever, or a manually deleted .bak).
     if [ -f "$CONSENSUS_FILE.bak" ]; then
         cp "$CONSENSUS_FILE.bak" "$CONSENSUS_FILE"
         log "Consensus restored from backup after failed cycle"
+        return 0
     fi
+    log "WARNING: no consensus backup to restore from -- invalid consensus left in place"
+    return 1
 }
 
 validate_consensus() {
@@ -3092,8 +3099,11 @@ This is Cycle #$loop_count. Act decisively."
         if validate_consensus; then
             log_cycle $loop_count "KEEP" "Consensus valid despite failure -- kept, work preserved"
         else
-            restore_consensus
-            log_cycle $loop_count "RESTORE" "Consensus invalid after cycle -- restored from backup"
+            if restore_consensus; then
+                log_cycle $loop_count "RESTORE" "Consensus invalid after cycle -- restored from backup"
+            else
+                log_cycle $loop_count "NOBACKUP" "Consensus invalid AND no backup exists -- left in place, needs review"
+            fi
         fi
         # Discard any partial atomic write
         rm -f "$PROJECT_DIR/memories/.consensus.tmp"

@@ -41,7 +41,15 @@ validate_consensus() {
     return 0
 }
 
-restore_consensus() { cp "$BACKUP_FILE" "$CONSENSUS_FILE"; }
+# Mirrors production: returns 0 if restored, 1 if no backup. Honest status so
+# the caller can't log "restored" when nothing was restored.
+restore_consensus() {
+    if [ -f "$BACKUP_FILE" ]; then
+        cp "$BACKUP_FILE" "$CONSENSUS_FILE"
+        return 0
+    fi
+    return 1
+}
 
 # --- The decision under test (production logic in the fail branch) ---
 # On cycle failure: keep consensus iff validate passes; else restore.
@@ -102,6 +110,25 @@ action=$(apply_failure_recovery)
 check "empty consensus on failure: action" "$action" "RESTORE"
 check "empty consensus on failure: backup restored" \
     "$(grep -c '^## Company State' "$CONSENSUS_FILE")" "1"
+
+# --- Case 4: invalid consensus + backup exists -> restore returns success ---
+printf '%s\n' "$VALID_BACKUP" > "$BACKUP_FILE"
+printf '%s\n' "$INVALID" > "$CONSENSUS_FILE"
+restore_consensus
+check "restore with backup: exit code" "$?" "0"
+check "restore with backup: content restored" \
+    "$(grep -c 'old)' "$CONSENSUS_FILE")" "1"
+
+# --- Case 5: invalid consensus + NO backup -> restore returns failure, file untouched ---
+# Root cause this guards: first cycle ever (no .bak yet) or manually deleted .bak.
+# Old restore_consensus silently no-op'd; old caller STILL logged "restored from
+# backup" -- a lie. New contract: return 1 so caller can surface NOBACKUP honestly.
+rm -f "$BACKUP_FILE"
+printf '%s\n' "$INVALID" > "$CONSENSUS_FILE"
+restore_consensus
+check "restore without backup: exit code" "$?" "1"
+check "restore without backup: invalid file left untouched" \
+    "$(grep -c 'not a consensus file' "$CONSENSUS_FILE")" "1"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
